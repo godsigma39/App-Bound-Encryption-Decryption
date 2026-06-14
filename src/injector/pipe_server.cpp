@@ -15,7 +15,7 @@ namespace Injector {
         : m_pipeName(GenerateName(browserType)), m_browserType(browserType) {}
 
     void PipeServer::Create() {
-        m_hPipe.reset(CreateNamedPipeW(m_pipeName.c_str(), PIPE_ACCESS_DUPLEX,
+        m_hPipe.reset(CreateNamedPipeW(m_pipeName.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
                                        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
                                        1, 4096, 4096, 0, nullptr));
         
@@ -25,8 +25,29 @@ namespace Injector {
     }
 
     void PipeServer::WaitForClient() {
-        if (!ConnectNamedPipe(m_hPipe.get(), nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) {
-            throw std::runtime_error("ConnectNamedPipe failed: " + std::to_string(GetLastError()));
+        OVERLAPPED ov = {};
+        ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!ov.hEvent) {
+            throw std::runtime_error("CreateEvent failed: " + std::to_string(GetLastError()));
+        }
+
+        BOOL result = ConnectNamedPipe(m_hPipe.get(), &ov);
+        DWORD err = GetLastError();
+
+        if (!result && err == ERROR_IO_PENDING) {
+            DWORD waitResult = WaitForSingleObject(ov.hEvent, 30000);
+            CloseHandle(ov.hEvent);
+            if (waitResult == WAIT_TIMEOUT) {
+                CancelIo(m_hPipe.get());
+                throw std::runtime_error("Payload connection timed out (30s). Injection may have failed.");
+            } else if (waitResult != WAIT_OBJECT_0) {
+                throw std::runtime_error("WaitForSingleObject failed: " + std::to_string(GetLastError()));
+            }
+        } else if (!result && err != ERROR_PIPE_CONNECTED) {
+            CloseHandle(ov.hEvent);
+            throw std::runtime_error("ConnectNamedPipe failed: " + std::to_string(err));
+        } else {
+            CloseHandle(ov.hEvent);
         }
     }
 
